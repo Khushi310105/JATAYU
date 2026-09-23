@@ -40,7 +40,12 @@ export async function fetchDashboard() {
 
 export async function fetchCustomerHistory(customerCode) {
   const response = await fetch(`/api/customers/${encodeURIComponent(customerCode.trim())}`);
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "Customer lookup failed.");
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error("Customer lookup failed. Please try again.");
+  }
+  if (!response.ok) throw new Error(formatApiError(data.error, "Customer lookup failed."));
   return data;
 }
