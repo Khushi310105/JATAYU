@@ -5,6 +5,7 @@ from pathlib import Path
 from statistics import mode
 
 import joblib
+import shap
 import pandas as pd
 from flask import Blueprint, jsonify, request
 from pydantic import ValidationError
@@ -17,6 +18,12 @@ from ml.feature_engineering import transform_raw_input
 
 predict_bp = Blueprint("predict", __name__, url_prefix="/api")
 MODEL_PATH = Path(__file__).resolve().parents[2] / "ml" / "credit_default_full_model_bundle.pkl"
+SHAP_DISPLAY_FEATURES = {
+    "LIMIT_BAL": "Credit limit",
+    "AGE": "Customer age",
+    "PAY_0": "Latest payment delay",
+    "BILL_AMT1": "Latest bill amount",
+}
 
 
 @lru_cache(maxsize=1)
@@ -47,6 +54,60 @@ def get_model_assets():
         "selection_metric": "precision",
     }
 
+
+@lru_cache(maxsize=1)
+def get_shap_background():
+    """Load a representative transformed sample for SHAP baselines."""
+    dataset_path = MODEL_PATH.parents[1] / "data" / "UCI_Credit_Card.xls"
+    if not dataset_path.exists():
+        raise FileNotFoundError(f"Missing SHAP background data: {dataset_path.name}")
+
+    data = pd.read_excel(dataset_path, header=1).rename(columns={"ID": "uci_id"})
+    data = data.drop(columns=["uci_id", "default.payment.next.month"], errors="ignore")
+    data = data.sample(n=min(512, len(data)), random_state=42)
+    return transform_raw_input(data)
+
+
+def explain_model_prediction(pipeline, model_input, background_input):
+    """Return the strongest SHAP contributors for one model prediction."""
+    preprocessor = pipeline.named_steps["prep"]
+    estimator = pipeline.named_steps["model"]
+    transformed_background = preprocessor.transform(background_input)
+    transformed_input = preprocessor.transform(model_input)
+    explanation = shap.Explainer(estimator, transformed_background)(transformed_input)
+    shap_values = explanation.values
+
+    if shap_values.ndim == 3:
+        shap_values = shap_values[0, :, 1]
+    else:
+        shap_values = shap_values[0]
+
+    raw_features = list(model_input.columns)
+    feature_names = preprocessor.get_feature_names_out()
+    grouped_values = {}
+    for feature_name, contribution in zip(feature_names, shap_values):
+        transformed_name = feature_name.split("__", 1)[-1]
+        source_name = next(
+            (
+                raw_name
+                for raw_name in sorted(raw_features, key=len, reverse=True)
+                if transformed_name == raw_name or transformed_name.startswith(f"{raw_name}_")
+            ),
+            transformed_name,
+        )
+        grouped_values[source_name] = grouped_values.get(source_name, 0.0) + float(contribution)
+
+    return [
+        {
+            "feature": SHAP_DISPLAY_FEATURES[feature_name],
+            "value": float(model_input.iloc[0][feature_name]),
+            "contribution": contribution,
+        }
+        for feature_name, contribution in sorted(
+            grouped_values.items(), key=lambda item: abs(item[1]), reverse=True
+        )
+        if feature_name in SHAP_DISPLAY_FEATURES
+    ][:4]
 
 @predict_bp.post("/predict")
 def predict():
@@ -92,6 +153,7 @@ def predict():
         model_input = transform_raw_input(raw_frame)
         assets = get_model_assets()
         model_results = []
+        shap_background = get_shap_background()
 
         display_names = {
             "random_forest": "Random Forest",
@@ -110,7 +172,9 @@ def predict():
                     "label": "Default" if prediction_value == 1 else "No Default",
                     "default_probability": default_probability,
                     "threshold": threshold,
-                    "shap_explanation": [],
+                    "shap_explanation": explain_model_prediction(
+                        pipeline, model_input, shap_background
+                    ),
                 }
             )
 
