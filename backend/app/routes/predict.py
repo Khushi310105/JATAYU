@@ -32,11 +32,11 @@ def get_model_assets():
     if not MODEL_PATH.exists():
         raise FileNotFoundError(f"Missing trained model file: {MODEL_PATH.name}")
     artifact = joblib.load(MODEL_PATH)
-    precision_scores = {
-        model_key: metrics["threshold_tuned_f1"]["precision"]
+    recall_scores = {
+        model_key: metrics["threshold_tuned_f1"]["recall"]
         for model_key, metrics in artifact["test_metrics"].items()
     }
-    best_model_key = max(precision_scores, key=precision_scores.get)
+    best_model_key = max(recall_scores, key=recall_scores.get)
     display_names = {
         "random_forest": "Random Forest",
         "xgboost": "XGBoost",
@@ -48,10 +48,10 @@ def get_model_assets():
         "selected_model": {
             "name": display_names[best_model_key],
             "key": best_model_key,
-            "precision": precision_scores[best_model_key],
+            "recall": recall_scores[best_model_key],
         },
         "ensemble_method": artifact["ensemble"]["method"],
-        "selection_metric": "precision",
+        "selection_metric": "recall",
     }
 
 
